@@ -1,30 +1,49 @@
 import os
 import faiss
-import torch
+import json
+import requests
+import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 # ---------------- CONFIG ----------------
 TEXT_DIR = r"C:\Users\revan\Downloads\InfosysSpringboard\output"
 EMBED_MODEL = "all-MiniLM-L6-v2"
-LLM_MODEL = "google/flan-t5-base"
-TOP_K = 5
+OLLAMA_MODEL = "gemma:2b"
+TOP_K = 6
 MAX_CONTEXT_WORDS = 400
+OLLAMA_URL = "http://localhost:11434/api/generate"
+TIMEOUT = 600
 # ---------------------------------------
 
-# 1️⃣ Load documents
+
+# 1️⃣ Load documents safely
 documents = []
+
+if not os.path.exists(TEXT_DIR):
+    raise FileNotFoundError(f"TEXT_DIR not found: {TEXT_DIR}")
+
 for file in os.listdir(TEXT_DIR):
     if file.endswith(".txt"):
-        with open(os.path.join(TEXT_DIR, file), "r", encoding="utf-8") as f:
-            documents.append(f.read())
+        with open(os.path.join(TEXT_DIR, file), "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read().strip()
+            if text:
+                documents.append(text)
 
 print(f"Loaded {len(documents)} lease documents")
 
+if not documents:
+    raise ValueError("No text files found or all files are empty")
+
+
 # 2️⃣ Chunking
-def chunk_text(text, chunk_size=100):
+def chunk_text(text, chunk_size=120):
     words = text.split()
-    return [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+    return [
+        " ".join(words[i:i + chunk_size])
+        for i in range(0, len(words), chunk_size)
+        if len(words[i:i + chunk_size]) > 20
+    ]
+
 
 chunks = []
 for doc in documents:
@@ -32,78 +51,133 @@ for doc in documents:
 
 print(f"Created {len(chunks)} text chunks")
 
-# 3️⃣ FAISS with normalization (IMPORTANT)
-embedder = SentenceTransformer(EMBED_MODEL)
-embeddings = embedder.encode(chunks, normalize_embeddings=True)
+if not chunks:
+    raise ValueError("Chunking failed — no chunks created")
 
-index = faiss.IndexFlatIP(embeddings.shape[1])  # cosine similarity
+
+# 3️⃣ FAISS embeddings (FIX: float32)
+embedder = SentenceTransformer(EMBED_MODEL)
+
+embeddings = embedder.encode(
+    chunks,
+    convert_to_numpy=True,
+    normalize_embeddings=True
+).astype(np.float32)
+
+index = faiss.IndexFlatL2(embeddings.shape[1])
 index.add(embeddings)
+
 print("FAISS index built")
 
-# 4️⃣ Query
-query = "Which clauses in a car lease can be negotiated to reduce price, fees, or penalties?"
-query_embedding = embedder.encode([query], normalize_embeddings=True)
+
+# 4️⃣ Query (FIX: float32 + correct shape)
+query = "lease payment fees penalties early termination mileage insurance"
+
+query_embedding = embedder.encode(
+    [query],
+    convert_to_numpy=True,
+    normalize_embeddings=True
+).astype(np.float32)
 
 _, indices = index.search(query_embedding, TOP_K)
 
-# Build context safely
+
+# 5️⃣ Filter useful chunks
+KEYWORDS = [
+    "payment", "fee", "penalty", "termination",
+    "mileage", "insurance", "cost", "deposit"
+]
+
 context_chunks = []
 word_count = 0
+
 for i in indices[0]:
-    words = chunks[i].split()
-    if word_count + len(words) > MAX_CONTEXT_WORDS:
-        break
-    context_chunks.append(chunks[i])
-    word_count += len(words)
+    chunk = chunks[i]
+    if any(k in chunk.lower() for k in KEYWORDS):
+        words = chunk.split()
+        if word_count + len(words) > MAX_CONTEXT_WORDS:
+            break
+        context_chunks.append(chunk)
+        word_count += len(words)
 
 context = "\n\n".join(context_chunks)
 
-# DEBUG (optional but useful)
-print("\n--- RETRIEVED CONTEXT ---")
-print(context[:800])
-print("------------------------\n")
+if not context.strip():
+    raise ValueError("❌ No relevant lease clauses found")
 
-# 5️⃣ Load LLM
-tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
-model = AutoModelForSeq2SeqLM.from_pretrained(LLM_MODEL)
+print("\n--- CONTEXT SENT TO OLLAMA ---")
+print(context[:1000])
+print("--------------------------------")
 
-# 6️⃣ STRONG TASK-STYLE PROMPT (CRITICAL FIX)
+
+# 6️⃣ Prompt
 prompt = f"""
-Task: Extract negotiation opportunities from a car lease.
+You are a professional car lease negotiation expert.
 
-From the lease text below:
-1. List clauses that can be negotiated
-2. Identify any fees or penalties
-3. Explain how each item can be reduced
-4. Give practical negotiation advice
+Using ONLY the lease clauses below:
+1. Identify negotiable fees, deposits, mileage limits, penalties
+2. Explain how customers can negotiate each item
+3. Provide example negotiation phrases customers can say
 
-Lease text:
+Lease clauses:
 {context}
 
-Output format:
-- Negotiable Clause:
-- Why it matters:
-- How to negotiate it:
+Respond with a JSON object in the following format:
+{{
+  "negotiable_items": [
+    {{
+      "item": "fee name",
+      "description": "brief description",
+      "negotiation_tips": "how to negotiate",
+      "example_phrase": "example phrase"
+    }}
+  ],
+  "summary": "overall summary"
+}}
 """
 
-inputs = tokenizer(
-    prompt,
-    return_tensors="pt",
-    truncation=True,
-    max_length=512
-)
 
-outputs = model.generate(
-    **inputs,
-    max_new_tokens=350,
-    temperature=0.0,
-    repetition_penalty=1.3,
-    no_repeat_ngram_size=3
-)
+# 7️⃣ Ollama call
+print("\nGenerating negotiation advice...\n")
 
-response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+try:
+    response = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": 500}
+        },
+        timeout=TIMEOUT
+    )
+except requests.exceptions.ConnectionError:
+    raise RuntimeError("❌ Ollama is not running. Start it using: ollama serve")
 
-print("\n" + "=" * 60)
-print("NEGOTIATION ADVICE")
+if response.status_code != 200:
+    print(f"Error: {response.status_code}")
+    print(response.text)
+    exit()
+
+data = response.json()
+result = data.get("response", "")
+
+if len(result.strip()) < 10:
+    print("\n⚠️ Weak output from Ollama")
+    print("Raw result:", repr(result))
+else:
+    try:
+        parsed = json.loads(result)
+        print("Parsed JSON:")
+        print(json.dumps(parsed, indent=2))
+    except json.JSONDecodeError as e:
+        print(f"\n❌ Failed to parse JSON: {e}")
+        print("Raw result:")
+        print(result)
+
+
+# 8️⃣ Final output
+print("\n\n" + "=" * 60)
+print("NEGOTIATION ADVICE (GEMMA)")
 print("=" * 60)
-print(response)
+# The JSON is already printed above
