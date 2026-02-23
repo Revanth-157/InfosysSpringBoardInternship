@@ -1,0 +1,2 @@
+
+            "model": ollama_model,

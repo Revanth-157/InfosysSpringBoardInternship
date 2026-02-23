@@ -1,0 +1,13 @@
+flask
+flask-cors
+requests
+pytesseract
+pdf2image
+sentence-transformers
+faiss-cpu>=1.10.0
+numpy
+python-dotenv
+gunicorn
+sqlalchemy
+psycopg2-binary
+PyJWT
