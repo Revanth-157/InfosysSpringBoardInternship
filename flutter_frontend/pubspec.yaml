@@ -1,0 +1,16 @@
+name: car_lease_assistant
+description: A minimal Flutter frontend for Car Lease Analysis API
+publish_to: 'none'
+version: 0.0.1
+environment:
+  sdk: '>=2.17.0 <3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.1
+  file_picker: ^8.0.3
+  http_parser: ^4.0.2
+
+flutter:
+  uses-material-design: true
