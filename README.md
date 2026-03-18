@@ -141,5 +141,3 @@ Then open the URL printed by Streamlit (usually `http://localhost:8501`).
 - The Flutter UI assumes the API is reachable on localhost.
 
 ---
-
-If you'd like, I can also add a concise `docker-compose.yml` to run the backend + PostgreSQL + Flutter web build together, or help convert the hard-coded paths into ENV variables for cross-platform compatibility.
